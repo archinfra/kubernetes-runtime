@@ -33,11 +33,21 @@ assert_sha256() {
   [[ "$actual" == "$expected" ]] || fail "SHA256 mismatch: $file expected=$expected actual=$actual"
   log "sha256 OK: $(basename "$file") = $actual"
 }
+verify_registry_digest() {
+  local image="$1" expected="$2" actual
+  actual="$(skopeo inspect --creds "$GHCR_USER:$GHCR_TOKEN" "docker://$image" | jq -r '.Digest')"
+  log "registry digest: $image -> $actual"
+  [[ "$actual" == "$expected" ]] || fail "registry digest mismatch: image=$image expected=$expected actual=$actual"
+}
 
 require_cmd buildah skopeo jq sha256sum tar file sed grep install
 [[ "$ARCH" == amd64 ]] || fail "r1 supports amd64 only (got: $ARCH)"
 [[ "$RUNTIME_PROFILE" == docker ]] || fail "r1 supports Docker profile only (got: $RUNTIME_PROFILE)"
 
+# Canonical provenance references. Buildah 1.33 on Ubuntu 24.04 cannot reliably
+# consume BuildKit OCI indexes with SBOM/provenance by repo@digest, so the release
+# builder verifies each tag's live registry digest first and then pulls that verified tag.
+# The cache tags are Archinfra-controlled release tags, not floating aliases.
 SEALOS_CACHE_REF="${SEALOS_CACHE_IMAGE}@${SEALOS_CACHE_DIGEST}"
 DOCKER_CACHE_REF="${DOCKER_CACHE_IMAGE}@${DOCKER_CACHE_DIGEST}"
 CRICTL_CACHE_REF="${CRICTL_CACHE_IMAGE}@${CRICTL_CACHE_DIGEST}"
@@ -55,19 +65,25 @@ log "cache build git sha=$CACHE_BUILD_GIT_SHA run=$CACHE_BUILD_RUN_ID"
 # Authenticate rootful Buildah because Sealos also uses the root container storage.
 printf '%s' "$GHCR_TOKEN" | sudo buildah login --username "$GHCR_USER" --password-stdin ghcr.io >/dev/null
 
+# Fail closed before any cache content is consumed.
+verify_registry_digest "$SEALOS_CACHE_IMAGE" "$SEALOS_CACHE_DIGEST"
+verify_registry_digest "$DOCKER_CACHE_IMAGE" "$DOCKER_CACHE_DIGEST"
+verify_registry_digest "$CRICTL_CACHE_IMAGE" "$CRICTL_CACHE_DIGEST"
+verify_registry_digest "$KUBERNETES_CACHE_IMAGE" "$KUBERNETES_CACHE_DIGEST"
+
 mount_cache() {
-  local ref="$1" cid
-  cid="$(sudo buildah from --platform "linux/$ARCH" "$ref")"
+  local image="$1" cid
+  cid="$(sudo buildah from --platform "linux/$ARCH" "$image")"
   sudo buildah mount "$cid"
 }
 
-log "mount VERIFIED cache artifacts"
-MOUNT_SEALOS="$(mount_cache "$SEALOS_CACHE_REF")"
-MOUNT_DOCKER="$(mount_cache "$DOCKER_CACHE_REF")"
-MOUNT_CRICTL="$(mount_cache "$CRICTL_CACHE_REF")"
-MOUNT_KUBE="$(mount_cache "$KUBERNETES_CACHE_REF")"
+log "mount digest-verified cache artifacts"
+MOUNT_SEALOS="$(mount_cache "$SEALOS_CACHE_IMAGE")"
+MOUNT_DOCKER="$(mount_cache "$DOCKER_CACHE_IMAGE")"
+MOUNT_CRICTL="$(mount_cache "$CRICTL_CACHE_IMAGE")"
+MOUNT_KUBE="$(mount_cache "$KUBERNETES_CACHE_IMAGE")"
 
-# Defense-in-depth: verify the key bytes inside the digest-pinned cache images.
+# Defense-in-depth: verify the key bytes inside the digest-verified cache images.
 assert_sha256 "$DOCKER_SOURCE_SHA256" "$MOUNT_DOCKER/cri/docker.tgz"
 assert_sha256 "$CRI_DOCKERD_SOURCE_SHA256" "$MOUNT_DOCKER/cri/cri-dockerd.tgz"
 assert_sha256 "$CRICTL_SOURCE_SHA256" "$MOUNT_CRICTL/cri/crictl.tar.gz"
@@ -136,12 +152,13 @@ LVSCARE_REF=$LVSCARE_REF
 EOF
 
 # The Kubernetes cache is the immutable base layer containing kubeadm/kubelet/kubectl
-# and the offline registry. The Docker/runtime files above are the rootfs overlay.
-sed -E "s#^FROM .+#FROM $KUBERNETES_CACHE_REF#" "$ROOT/Kubefile" > "$ROOT/Kubefile.tmp"
+# and the offline registry. Because Buildah 1.33 has digest-index compatibility issues,
+# the Kubefile uses the tag only after its registry digest has been verified above.
+sed -E "s#^FROM .+#FROM $KUBERNETES_CACHE_IMAGE#" "$ROOT/Kubefile" > "$ROOT/Kubefile.tmp"
 mv "$ROOT/Kubefile.tmp" "$ROOT/Kubefile"
 
-grep -F "FROM $KUBERNETES_CACHE_REF" "$ROOT/Kubefile" >/dev/null \
-  || fail "Kubefile base image was not pinned to Kubernetes cache digest"
+grep -F "FROM $KUBERNETES_CACHE_IMAGE" "$ROOT/Kubefile" >/dev/null \
+  || fail "Kubefile base image was not set to verified Kubernetes cache"
 
 pauseImage="$(grep '/pause:' "$MOUNT_KUBE/images/shim/DefaultImageList" | head -n1)"
 [[ -n "$pauseImage" ]] || fail "pause image not found in Kubernetes image list"
