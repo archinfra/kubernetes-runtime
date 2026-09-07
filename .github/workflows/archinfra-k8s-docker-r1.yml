@@ -86,15 +86,15 @@ jobs:
         run: bash archinfra/scripts/build-k8s-docker.sh
 
       - name: Mirror verified Runtime image to Alibaba Cloud ACR
-        if: ${{ vars.ACR_REGISTRY != '' }}
+        if: ${{ vars.PUBLISH_ALIYUN == 'true' }}
         shell: bash
         env:
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
-          ACR_NAMESPACE: ${{ vars.ACR_NAMESPACE }}
-          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
-          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+          ALIYUN_REGISTRY: ${{ vars.ALIYUN_REGISTRY }}
+          ALIYUN_NAMESPACE: ${{ vars.ALIYUN_NAMESPACE }}
+          ALIYUN_USERNAME: ${{ secrets.ALIYUN_USERNAME }}
+          ALIYUN_PASSWORD: ${{ secrets.ALIYUN_PASSWORD }}
         run: |
           set -euo pipefail
 
@@ -102,14 +102,12 @@ jobs:
           PROVENANCE="out/runtime-v1.36.4-r1.provenance.env"
           test -s "$PROVENANCE"
 
-          : "${ACR_REGISTRY:?organization variable ACR_REGISTRY is required}"
-          : "${ACR_USERNAME:?organization secret ACR_USERNAME is required}"
-          : "${ACR_PASSWORD:?organization secret ACR_PASSWORD is required}"
+          : "${ALIYUN_REGISTRY:?organization variable ALIYUN_REGISTRY is required}"
+          : "${ALIYUN_NAMESPACE:?organization variable ALIYUN_NAMESPACE is required}"
+          : "${ALIYUN_USERNAME:?organization secret ALIYUN_USERNAME is required}"
+          : "${ALIYUN_PASSWORD:?organization secret ALIYUN_PASSWORD is required}"
 
-          # Archinfra currently uses kube4 as the standard Alibaba Cloud namespace.
-          # ACR_NAMESPACE can override it at organization/repository scope when needed.
-          ACR_NAMESPACE="${ACR_NAMESPACE:-kube4}"
-          ACR_IMAGE="${ACR_REGISTRY}/${ACR_NAMESPACE}/kubernetes-runtime:${RELEASE_VERSION}-${ARCH}"
+          ALIYUN_IMAGE="${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/kubernetes-runtime:${RELEASE_VERSION}-${ARCH}"
 
           SRC_DIGEST="$(skopeo inspect \
             --creds "$GHCR_USER:$GHCR_TOKEN" \
@@ -118,42 +116,42 @@ jobs:
 
           echo "Mirroring:"
           echo "  source: $FINAL_IMAGE@$SRC_DIGEST"
-          echo "  target: $ACR_IMAGE"
+          echo "  target: $ALIYUN_IMAGE"
 
           skopeo copy \
             --all \
             --preserve-digests \
             --src-creds "$GHCR_USER:$GHCR_TOKEN" \
-            --dest-creds "$ACR_USERNAME:$ACR_PASSWORD" \
+            --dest-creds "$ALIYUN_USERNAME:$ALIYUN_PASSWORD" \
             "docker://$FINAL_IMAGE" \
-            "docker://$ACR_IMAGE"
+            "docker://$ALIYUN_IMAGE"
 
           DST_DIGEST="$(skopeo inspect \
-            --creds "$ACR_USERNAME:$ACR_PASSWORD" \
-            "docker://$ACR_IMAGE" | jq -r '.Digest')"
+            --creds "$ALIYUN_USERNAME:$ALIYUN_PASSWORD" \
+            "docker://$ALIYUN_IMAGE" | jq -r '.Digest')"
 
           if [[ "$DST_DIGEST" != "$SRC_DIGEST" ]]; then
-            echo "ERROR: ACR digest mismatch: source=$SRC_DIGEST target=$DST_DIGEST" >&2
+            echo "ERROR: Aliyun ACR digest mismatch: source=$SRC_DIGEST target=$DST_DIGEST" >&2
             exit 1
           fi
 
           cat >> "$PROVENANCE" <<EOF
-          ACR_MIRROR_STATUS=VERIFIED
-          ACR_REGISTRY=$ACR_REGISTRY
-          ACR_NAMESPACE=$ACR_NAMESPACE
-          ACR_IMAGE=$ACR_IMAGE
-          ACR_DIGEST=$DST_DIGEST
+          ALIYUN_MIRROR_STATUS=VERIFIED
+          ALIYUN_REGISTRY=$ALIYUN_REGISTRY
+          ALIYUN_NAMESPACE=$ALIYUN_NAMESPACE
+          ALIYUN_IMAGE=$ALIYUN_IMAGE
+          ALIYUN_DIGEST=$DST_DIGEST
           EOF
 
           {
             echo "## Alibaba Cloud ACR mirror"
             echo
-            echo "- Image: \`$ACR_IMAGE\`"
+            echo "- Image: \`$ALIYUN_IMAGE\`"
             echo "- Digest: \`$DST_DIGEST\`"
             echo "- Status: VERIFIED"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "ACR mirror VERIFIED: $ACR_IMAGE@$DST_DIGEST"
+          echo "Aliyun ACR mirror VERIFIED: $ALIYUN_IMAGE@$DST_DIGEST"
 
       - name: Upload runtime provenance
         if: always()
