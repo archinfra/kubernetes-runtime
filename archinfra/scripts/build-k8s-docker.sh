@@ -26,7 +26,7 @@ require_cmd() {
     command -v "$cmd" >/dev/null 2>&1 || fail "required command not found: $cmd"
   done
 }
-sha256_of() { sha256sum "$1" | awk '{print $1}'; }
+sha256_of() { sudo sha256sum "$1" | awk '{print $1}'; }
 assert_sha256() {
   local expected="$1" file="$2" actual
   actual="$(sha256_of "$file")"
@@ -83,17 +83,19 @@ MOUNT_DOCKER="$(mount_cache "$DOCKER_CACHE_IMAGE")"
 MOUNT_CRICTL="$(mount_cache "$CRICTL_CACHE_IMAGE")"
 MOUNT_KUBE="$(mount_cache "$KUBERNETES_CACHE_IMAGE")"
 
+# Rootful Buildah mounts live below /var/lib/containers and must be consumed as root.
+# Keep the mount read-only from the builder's point of view: all writes go to $ROOT.
 # Defense-in-depth: verify the key bytes inside the digest-verified cache images.
 assert_sha256 "$DOCKER_SOURCE_SHA256" "$MOUNT_DOCKER/cri/docker.tgz"
 assert_sha256 "$CRI_DOCKERD_SOURCE_SHA256" "$MOUNT_DOCKER/cri/cri-dockerd.tgz"
 assert_sha256 "$CRICTL_SOURCE_SHA256" "$MOUNT_CRICTL/cri/crictl.tar.gz"
 assert_sha256 "$KUBERNETES_IMAGE_LIST_SHA256" "$MOUNT_KUBE/images/shim/DefaultImageList"
 
-"$MOUNT_KUBE/bin/kubeadm" version -o short | grep -Fx "v$KUBERNETES_VERSION" >/dev/null \
+sudo "$MOUNT_KUBE/bin/kubeadm" version -o short | grep -Fx "v$KUBERNETES_VERSION" >/dev/null \
   || fail "kubeadm in cache is not v$KUBERNETES_VERSION"
-"$MOUNT_KUBE/bin/kubelet" --version | grep -F "v$KUBERNETES_VERSION" >/dev/null \
+sudo "$MOUNT_KUBE/bin/kubelet" --version | grep -F "v$KUBERNETES_VERSION" >/dev/null \
   || fail "kubelet in cache is not v$KUBERNETES_VERSION"
-"$MOUNT_KUBE/bin/kubectl" version --client=true 2>/dev/null | grep -F "v$KUBERNETES_VERSION" >/dev/null \
+sudo "$MOUNT_KUBE/bin/kubectl" version --client=true 2>/dev/null | grep -F "v$KUBERNETES_VERSION" >/dev/null \
   || fail "kubectl in cache is not v$KUBERNETES_VERSION"
 
 # Resolve lvscare once for this build and record the immutable digest in provenance.
@@ -111,20 +113,23 @@ mkdir -p "$ROOT/bin" "$ROOT/cri" "$ROOT/opt" "$ROOT/images/shim" "$ROOT/etc/arch
 
 # Use the exact Sealos binary from the verified cache as the builder and ship its runtime helpers.
 sudo install -m 0755 "$MOUNT_SEALOS/sealos/sealos" /usr/local/bin/sealos
-install -m 0755 "$MOUNT_SEALOS/sealos/image-cri-shim" "$ROOT/cri/image-cri-shim"
-install -m 0755 "$MOUNT_SEALOS/sealos/sealctl" "$ROOT/opt/sealctl"
+sudo install -m 0755 "$MOUNT_SEALOS/sealos/image-cri-shim" "$ROOT/cri/image-cri-shim"
+sudo install -m 0755 "$MOUNT_SEALOS/sealos/sealctl" "$ROOT/opt/sealctl"
 sealos version | grep -F "$SEALOS_VERSION" >/dev/null || fail "Sealos builder is not $SEALOS_VERSION"
 
 # Docker profile payload.
-cp -a "$MOUNT_DOCKER/cri/docker.tgz" "$ROOT/cri/docker.tgz"
-cp -a "$MOUNT_DOCKER/cri/cri-dockerd.tgz" "$ROOT/cri/cri-dockerd.tgz"
-install -m 0755 "$MOUNT_DOCKER/cri/registry" "$ROOT/cri/registry"
-install -m 0755 "$MOUNT_DOCKER/cri/conntrack" "$ROOT/bin/conntrack"
-install -m 0755 "$MOUNT_DOCKER/cri/lsof" "$ROOT/opt/lsof"
+sudo cp -a "$MOUNT_DOCKER/cri/docker.tgz" "$ROOT/cri/docker.tgz"
+sudo cp -a "$MOUNT_DOCKER/cri/cri-dockerd.tgz" "$ROOT/cri/cri-dockerd.tgz"
+sudo install -m 0755 "$MOUNT_DOCKER/cri/registry" "$ROOT/cri/registry"
+sudo install -m 0755 "$MOUNT_DOCKER/cri/conntrack" "$ROOT/bin/conntrack"
+sudo install -m 0755 "$MOUNT_DOCKER/cri/lsof" "$ROOT/opt/lsof"
 
 # CRI client aligned with Kubernetes 1.36.
-tar -xzf "$MOUNT_CRICTL/cri/crictl.tar.gz" -C "$ROOT/bin" crictl
-chmod 0755 "$ROOT/bin/crictl"
+sudo tar -xzf "$MOUNT_CRICTL/cri/crictl.tar.gz" -C "$ROOT/bin" crictl
+sudo chmod 0755 "$ROOT/bin/crictl"
+
+# Return ownership of the assembled overlay to the runner before generating metadata.
+sudo chown -R "$(id -u):$(id -g)" "$ROOT"
 
 # Keep a human-readable immutable release record inside the final Cluster Image.
 cat > "$ROOT/etc/archinfra/release.env" <<EOF
@@ -160,7 +165,7 @@ mv "$ROOT/Kubefile.tmp" "$ROOT/Kubefile"
 grep -F "FROM $KUBERNETES_CACHE_IMAGE" "$ROOT/Kubefile" >/dev/null \
   || fail "Kubefile base image was not set to verified Kubernetes cache"
 
-pauseImage="$(grep '/pause:' "$MOUNT_KUBE/images/shim/DefaultImageList" | head -n1)"
+pauseImage="$(sudo grep '/pause:' "$MOUNT_KUBE/images/shim/DefaultImageList" | head -n1)"
 [[ -n "$pauseImage" ]] || fail "pause image not found in Kubernetes image list"
 echo "$LVSCARE_REF" > "$ROOT/images/shim/LvscareImageList"
 
