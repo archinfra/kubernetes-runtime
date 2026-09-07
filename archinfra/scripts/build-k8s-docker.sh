@@ -99,11 +99,13 @@ sudo "$MOUNT_KUBE/bin/kubectl" version --client=true 2>/dev/null | grep -F "v$KU
   || fail "kubectl in cache is not v$KUBERNETES_VERSION"
 
 # Resolve lvscare once for this build and record the immutable digest in provenance.
-# After the first VERIFIED runtime build this value will be promoted into the runtime build lock.
+# Sealos' image save path cannot consume tag@digest here, so we verify the versioned
+# tag first and pass that verified tag to Sealos while retaining the immutable ref.
 LVSCARE_DIGEST="$(skopeo inspect --creds "$GHCR_USER:$GHCR_TOKEN" "docker://$LVSCARE_IMAGE" | jq -r '.Digest')"
 [[ "$LVSCARE_DIGEST" == sha256:* ]] || fail "unable to resolve lvscare digest for $LVSCARE_IMAGE"
 LVSCARE_REF="${LVSCARE_IMAGE}@${LVSCARE_DIGEST}"
-log "lvscare=$LVSCARE_REF"
+LVSCARE_RUNTIME_IMAGE="$LVSCARE_IMAGE"
+log "lvscare verified: $LVSCARE_RUNTIME_IMAGE -> $LVSCARE_DIGEST"
 
 # Assemble the Docker rootfs overlay while retaining the upstream Sealos lifecycle scripts/configuration.
 cp -a "$REPO_ROOT/docker/." "$ROOT/"
@@ -167,7 +169,7 @@ grep -F "FROM $KUBERNETES_CACHE_IMAGE" "$ROOT/Kubefile" >/dev/null \
 
 pauseImage="$(sudo grep '/pause:' "$MOUNT_KUBE/images/shim/DefaultImageList" | head -n1)"
 [[ -n "$pauseImage" ]] || fail "pause image not found in Kubernetes image list"
-echo "$LVSCARE_REF" > "$ROOT/images/shim/LvscareImageList"
+echo "$LVSCARE_RUNTIME_IMAGE" > "$ROOT/images/shim/LvscareImageList"
 
 # Normalize executable bits for rootfs scripts and binaries.
 find "$ROOT" -type f -exec file {} \; \
@@ -182,7 +184,7 @@ sudo sealos build \
   --label "sealos.io.type=rootfs" \
   --label "sealos.io.version=v1beta1" \
   --label "version=v$KUBERNETES_VERSION" \
-  --label "image=$LVSCARE_REF" \
+  --label "image=$LVSCARE_RUNTIME_IMAGE" \
   --label "io.archinfra.release=$RELEASE_VERSION" \
   --label "io.archinfra.runtime=$RUNTIME_PROFILE" \
   --label "io.archinfra.cache.build-sha=$CACHE_BUILD_GIT_SHA" \
