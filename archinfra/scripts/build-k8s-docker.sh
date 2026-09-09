@@ -209,7 +209,7 @@ sudo sealos logout ghcr.io >/dev/null || true
 FINAL_DIGEST="$(skopeo inspect --creds "$GHCR_USER:$GHCR_TOKEN" "docker://$FINAL_IMAGE" | jq -r '.Digest')"
 [[ "$FINAL_DIGEST" == sha256:* ]] || fail "unable to resolve final image digest"
 
-PROVENANCE="$OUT_DIR/runtime-v1.36.4-r1.provenance.env"
+PROVENANCE="$OUT_DIR/runtime-$RELEASE_VERSION.provenance.env"
 cat > "$PROVENANCE" <<EOF
 BUILD_STATUS=VERIFIED_BUILD_ONLY
 RELEASE_VERSION=$RELEASE_VERSION
