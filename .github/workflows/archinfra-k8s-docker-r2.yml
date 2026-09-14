@@ -188,3 +188,153 @@ jobs:
           name: kubernetes-runtime-v1.36.4-r2-${{ matrix.arch }}-provenance
           path: out/
           if-no-files-found: warn
+
+  publish-multiarch:
+    if: ${{ github.event_name != 'pull_request' }}
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install manifest verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends skopeo jq
+          docker buildx version
+          skopeo --version
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish verified GHCR multi-arch manifest
+        shell: bash
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          source archinfra/releases/v1.36.4-r2.env
+
+          AMD_IMAGE="$FINAL_IMAGE"
+          ARM_IMAGE="$FINAL_IMAGE_ARM64"
+          MULTI_IMAGE="${FINAL_IMAGE%-amd64}"
+
+          AMD_DIGEST="$(skopeo inspect \
+            --override-os linux --override-arch amd64 \
+            --creds "$GHCR_USER:$GHCR_TOKEN" \
+            "docker://$AMD_IMAGE" | jq -r '.Digest')"
+          ARM_DIGEST="$(skopeo inspect \
+            --override-os linux --override-arch arm64 \
+            --creds "$GHCR_USER:$GHCR_TOKEN" \
+            "docker://$ARM_IMAGE" | jq -r '.Digest')"
+
+          test "$AMD_DIGEST" = sha256:*
+          test "$ARM_DIGEST" = sha256:*
+
+          echo "Publishing GHCR multi-arch manifest:"
+          echo "  linux/amd64: $AMD_IMAGE@$AMD_DIGEST"
+          echo "  linux/arm64: $ARM_IMAGE@$ARM_DIGEST"
+          echo "  target:      $MULTI_IMAGE"
+
+          docker buildx imagetools create \
+            --tag "$MULTI_IMAGE" \
+            "$AMD_IMAGE@$AMD_DIGEST" \
+            "$ARM_IMAGE@$ARM_DIGEST"
+
+          INSPECT="$(docker buildx imagetools inspect "$MULTI_IMAGE")"
+          printf '%s\n' "$INSPECT"
+          printf '%s\n' "$INSPECT" | grep -F 'linux/amd64' >/dev/null
+          printf '%s\n' "$INSPECT" | grep -F 'linux/arm64' >/dev/null
+          MULTI_DIGEST="$(printf '%s\n' "$INSPECT" | awk '/^Digest:/ {print $2; exit}')"
+          test "$MULTI_DIGEST" = sha256:*
+
+          mkdir -p out
+          cat > out/runtime-${RELEASE_VERSION}-multiarch.provenance.env <<EOF
+          BUILD_STATUS=VERIFIED_MULTIARCH
+          RELEASE_VERSION=$RELEASE_VERSION
+          BUILD_GIT_REPOSITORY=${GITHUB_REPOSITORY:-local}
+          BUILD_GIT_SHA=${GITHUB_SHA:-local}
+          BUILD_RUN_ID=${GITHUB_RUN_ID:-local}
+          MULTI_IMAGE=$MULTI_IMAGE
+          MULTI_DIGEST=$MULTI_DIGEST
+          AMD64_IMAGE=$AMD_IMAGE
+          AMD64_DIGEST=$AMD_DIGEST
+          ARM64_IMAGE=$ARM_IMAGE
+          ARM64_DIGEST=$ARM_DIGEST
+          EOF
+
+          echo "GHCR multi-arch VERIFIED: $MULTI_IMAGE@$MULTI_DIGEST"
+
+      - name: Publish verified Alibaba Cloud ACR multi-arch manifest
+        if: ${{ vars.PUBLISH_ALIYUN == 'true' }}
+        shell: bash
+        env:
+          ALIYUN_REGISTRY: ${{ vars.ALIYUN_REGISTRY }}
+          ALIYUN_NAMESPACE: ${{ vars.ALIYUN_NAMESPACE }}
+          ALIYUN_USERNAME: ${{ secrets.ALIYUN_USERNAME }}
+          ALIYUN_PASSWORD: ${{ secrets.ALIYUN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          source archinfra/releases/v1.36.4-r2.env
+
+          : "${ALIYUN_REGISTRY:?organization variable ALIYUN_REGISTRY is required}"
+          : "${ALIYUN_NAMESPACE:?organization variable ALIYUN_NAMESPACE is required}"
+          : "${ALIYUN_USERNAME:?organization secret ALIYUN_USERNAME is required}"
+          : "${ALIYUN_PASSWORD:?organization secret ALIYUN_PASSWORD is required}"
+
+          AMD_IMAGE="${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/kubernetes-runtime:${RELEASE_VERSION}-amd64"
+          ARM_IMAGE="${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/kubernetes-runtime:${RELEASE_VERSION}-arm64"
+          MULTI_IMAGE="${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/kubernetes-runtime:${RELEASE_VERSION}"
+
+          AMD_DIGEST="$(skopeo inspect \
+            --override-os linux --override-arch amd64 \
+            --creds "$ALIYUN_USERNAME:$ALIYUN_PASSWORD" \
+            "docker://$AMD_IMAGE" | jq -r '.Digest')"
+          ARM_DIGEST="$(skopeo inspect \
+            --override-os linux --override-arch arm64 \
+            --creds "$ALIYUN_USERNAME:$ALIYUN_PASSWORD" \
+            "docker://$ARM_IMAGE" | jq -r '.Digest')"
+          test "$AMD_DIGEST" = sha256:*
+          test "$ARM_DIGEST" = sha256:*
+
+          printf '%s' "$ALIYUN_PASSWORD" | docker login \
+            --username "$ALIYUN_USERNAME" \
+            --password-stdin "$ALIYUN_REGISTRY"
+
+          docker buildx imagetools create \
+            --tag "$MULTI_IMAGE" \
+            "$AMD_IMAGE@$AMD_DIGEST" \
+            "$ARM_IMAGE@$ARM_DIGEST"
+
+          INSPECT="$(docker buildx imagetools inspect "$MULTI_IMAGE")"
+          printf '%s\n' "$INSPECT"
+          printf '%s\n' "$INSPECT" | grep -F 'linux/amd64' >/dev/null
+          printf '%s\n' "$INSPECT" | grep -F 'linux/arm64' >/dev/null
+          MULTI_DIGEST="$(printf '%s\n' "$INSPECT" | awk '/^Digest:/ {print $2; exit}')"
+          test "$MULTI_DIGEST" = sha256:*
+
+          cat >> out/runtime-${RELEASE_VERSION}-multiarch.provenance.env <<EOF
+          ALIYUN_MIRROR_STATUS=VERIFIED_MULTIARCH
+          ALIYUN_MULTI_IMAGE=$MULTI_IMAGE
+          ALIYUN_MULTI_DIGEST=$MULTI_DIGEST
+          ALIYUN_AMD64_IMAGE=$AMD_IMAGE
+          ALIYUN_AMD64_DIGEST=$AMD_DIGEST
+          ALIYUN_ARM64_IMAGE=$ARM_IMAGE
+          ALIYUN_ARM64_DIGEST=$ARM_DIGEST
+          EOF
+
+          echo "Aliyun ACR multi-arch VERIFIED: $MULTI_IMAGE@$MULTI_DIGEST"
+
+      - name: Upload multi-arch provenance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubernetes-runtime-v1.36.4-r2-multiarch-provenance
+          path: out/runtime-v1.36.4-r2-multiarch.provenance.env
+          if-no-files-found: error
