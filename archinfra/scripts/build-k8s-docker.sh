@@ -123,9 +123,10 @@ mount_cache() {
 }
 
 log "mount digest-verified cache artifacts"
-# Host builder (always amd64 Sealos, executable on the x86_64 runner).
-MOUNT_SEALOS_BUILDER="$(sudo buildah from --platform linux/amd64 "$SEALOS_BUILDER_CACHE_IMAGE")"
-sudo buildah mount "$MOUNT_SEALOS_BUILDER"
+# Host builder (always amd64 Sealos, executable on the x86_64 runner). Keep the
+# container id and mount path separate; buildah from returns the former.
+SEALOS_BUILDER_CID="$(sudo buildah from --platform linux/amd64 "$SEALOS_BUILDER_CACHE_IMAGE")"
+MOUNT_SEALOS_BUILDER="$(sudo buildah mount "$SEALOS_BUILDER_CID")"
 # Target payload caches, mounted at the target arch.
 MOUNT_SEALOS_TARGET="$(mount_cache "$SEALOS_TARGET_CACHE_IMAGE")"
 MOUNT_DOCKER="$(mount_cache "$DOCKER_CACHE_IMAGE")"
