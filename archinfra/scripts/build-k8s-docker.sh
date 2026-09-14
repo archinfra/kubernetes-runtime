@@ -146,7 +146,7 @@ assert_sha256 "$CRICTL_SOURCE_SHA256" "$MOUNT_CRICTL/cri/crictl.tar.gz"
 assert_sha256 "$KUBERNETES_IMAGE_LIST_SHA256" "$MOUNT_KUBE/images/shim/DefaultImageList"
 
 # Probe the k8s payload binaries. Execution only works on amd64 (the runner is
-# x86_64); for arm64 we assert aarch64 ELF instead (they cannot run on this host).
+# x86_64); for arm64 inspect the binaries through the rootful Buildah mount.
 if [[ "$ARCH" == "amd64" ]]; then
   sudo "$MOUNT_KUBE/bin/kubeadm" version -o short | grep -Fx "v$KUBERNETES_VERSION" >/dev/null \
     || fail "kubeadm in cache is not v$KUBERNETES_VERSION"
@@ -156,7 +156,9 @@ if [[ "$ARCH" == "amd64" ]]; then
     || fail "kubectl in cache is not v$KUBERNETES_VERSION"
 else
   for b in kubeadm kubelet kubectl; do
-    file "$MOUNT_KUBE/bin/$b" | grep -qiE 'ARM aarch64|aarch64' \
+    binary_info="$(sudo file "$MOUNT_KUBE/bin/$b")"
+    log "binary arch: $binary_info"
+    printf '%s\n' "$binary_info" | grep -qiE 'ARM aarch64|aarch64' \
       || fail "$b in cache is not aarch64 ELF"
   done
 fi
