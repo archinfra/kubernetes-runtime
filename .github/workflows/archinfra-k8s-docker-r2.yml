@@ -57,6 +57,7 @@ jobs:
           test "$DOCKER_CACHE_DIGEST" != ""
           test "$CRICTL_CACHE_DIGEST" != ""
           test "$KUBERNETES_CACHE_DIGEST" != ""
+          test "$FINAL_IMAGE_ARM64" != ""
           echo "release lock validation OK"
 
   build:
@@ -107,10 +108,23 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Keep the arch the matrix set (env file records canonical amd64).
+          # The release lock is canonical amd64. Preserve the matrix target and
+          # re-select every architecture-specific value consumed by this step.
           _ARCH="${ARCH:-}"
           source archinfra/releases/v1.36.4-r2.env
           if [[ -n "$_ARCH" ]]; then ARCH="$_ARCH"; fi
+          case "$ARCH" in
+            amd64)
+              ;;
+            arm64)
+              FINAL_IMAGE="$FINAL_IMAGE_ARM64"
+              ;;
+            *)
+              echo "ERROR: unsupported mirror architecture: $ARCH" >&2
+              exit 1
+              ;;
+          esac
+
           PROVENANCE="out/runtime-${RELEASE_VERSION}.provenance.env"
           test -s "$PROVENANCE"
 
@@ -140,6 +154,7 @@ jobs:
             "docker://$ALIYUN_IMAGE"
 
           DST_DIGEST="$(skopeo inspect \
+            --override-os linux --override-arch "$ARCH" \
             --creds "$ALIYUN_USERNAME:$ALIYUN_PASSWORD" \
             "docker://$ALIYUN_IMAGE" | jq -r '.Digest')"
 
