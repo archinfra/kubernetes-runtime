@@ -7,8 +7,27 @@ OUT_DIR="${OUT_DIR:-$REPO_ROOT/out}"
 WORK_DIR="${WORK_DIR:-${RUNNER_TEMP:-/tmp}/archinfra-kubernetes-runtime}"
 
 [[ -f "$RELEASE_FILE" ]] || { echo "ERROR: release file not found: $RELEASE_FILE" >&2; exit 1; }
+# Keep the arch the invoking job set (the lock records the canonical amd64 value).
+_ARCH="${ARCH:-}"
 # shellcheck disable=SC1090
 source "$RELEASE_FILE"
+if [[ -n "$_ARCH" ]]; then ARCH="$_ARCH"; fi
+
+# Select per-arch cache images + final tag. The canonical lock is amd64; the
+# *_ARM64 variants (present in the lock) are used when ARCH=arm64.
+case "${ARCH:-amd64}" in
+  arm64)
+    SEALOS_CACHE_IMAGE="${SEALOS_CACHE_IMAGE_ARM64}"
+    SEALOS_CACHE_DIGEST="${SEALOS_CACHE_DIGEST_ARM64}"
+    DOCKER_CACHE_IMAGE="${DOCKER_CACHE_IMAGE_ARM64}"
+    DOCKER_CACHE_DIGEST="${DOCKER_CACHE_DIGEST_ARM64}"
+    CRICTL_CACHE_IMAGE="${CRICTL_CACHE_IMAGE_ARM64}"
+    CRICTL_CACHE_DIGEST="${CRICTL_CACHE_DIGEST_ARM64}"
+    KUBERNETES_CACHE_IMAGE="${KUBERNETES_CACHE_IMAGE_ARM64}"
+    KUBERNETES_CACHE_DIGEST="${KUBERNETES_CACHE_DIGEST_ARM64}"
+    FINAL_IMAGE="${FINAL_IMAGE_ARM64}"
+    ;;
+esac
 
 GHCR_USER="${GHCR_USER:?GHCR_USER is required}"
 GHCR_TOKEN="${GHCR_TOKEN:?GHCR_TOKEN is required}"
@@ -41,7 +60,6 @@ verify_registry_digest() {
 }
 
 require_cmd buildah skopeo jq sha256sum tar file sed grep install
-[[ "$ARCH" == amd64 ]] || fail "r1 supports amd64 only (got: $ARCH)"
 [[ "$RUNTIME_PROFILE" == docker ]] || fail "r1 supports Docker profile only (got: $RUNTIME_PROFILE)"
 
 # Canonical provenance references. Buildah 1.33 on Ubuntu 24.04 cannot reliably

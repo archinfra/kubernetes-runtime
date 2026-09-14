@@ -46,7 +46,7 @@ jobs:
           bash -n archinfra/scripts/build-k8s-docker.sh
           source archinfra/releases/v1.36.4-r2.env
           test "$RELEASE_VERSION" = "v1.36.4-r2"
-          test "$ARCH" = "amd64"
+          test "$ARCH" = "amd64" || test "$ARCH" = "arm64"
           test "$RUNTIME_PROFILE" = "docker"
           test "$KUBERNETES_VERSION" = "1.36.4"
           test "$SEALOS_VERSION" = "5.1.1"
@@ -64,6 +64,10 @@ jobs:
     needs: validate
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -86,6 +90,7 @@ jobs:
         env:
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARCH: ${{ matrix.arch }}
         run: bash archinfra/scripts/build-k8s-docker.sh
 
       - name: Mirror verified Runtime image to Alibaba Cloud ACR
