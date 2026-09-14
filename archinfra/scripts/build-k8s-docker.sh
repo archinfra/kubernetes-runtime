@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RELEASE_FILE="${RELEASE_FILE:-$REPO_ROOT/archinfra/releases/v1.36.4-r1.env}"
+RELEASE_FILE="${RELEASE_FILE:-$REPO_ROOT/archinfra/releases/v1.36.4-r2.env}"
 OUT_DIR="${OUT_DIR:-$REPO_ROOT/out}"
 WORK_DIR="${WORK_DIR:-${RUNNER_TEMP:-/tmp}/archinfra-kubernetes-runtime}"
 
@@ -15,8 +15,8 @@ if [[ -n "$_ARCH" ]]; then ARCH="$_ARCH"; fi
 
 # Select per-arch target-payload cache images + final tag. The canonical lock is
 # amd64; the *_ARM64 variants (present in the lock) are used when ARCH=arm64.
-# NOTE: the Sealos *builder* stays amd64 (host build tool) regardless of ARCH —
-# only the payload images (docker/crictl/kubernetes) flip arch.
+# NOTE: the Sealos builder stays amd64 (host build tool) regardless of ARCH;
+# Sealos runtime helpers are selected from the target-architecture Sealos cache.
 case "${ARCH:-amd64}" in
   arm64)
     DOCKER_CACHE_IMAGE="${DOCKER_CACHE_IMAGE_ARM64}"
@@ -30,9 +30,9 @@ case "${ARCH:-amd64}" in
 esac
 
 # The Sealos builder is a HOST tool running on the x86_64 GitHub runner; it must
-# always be the amd64 sealos even when ARCH=arm64. Its payload (image-cri-shim,
-# sealctl, lvscare) ships into the target rootfs, so we keep an arm64 sealos cache
-# ref purely for that payload.
+# always be the amd64 Sealos binary even when ARCH=arm64. Its runtime helpers
+# (image-cri-shim and sealctl) ship to target nodes, so they come from the target
+# architecture cache.
 SEALOS_BUILDER_CACHE_IMAGE="${SEALOS_CACHE_IMAGE}"
 SEALOS_BUILDER_CACHE_DIGEST="${SEALOS_CACHE_DIGEST}"
 if [[ "$ARCH" == "arm64" ]]; then
@@ -67,28 +67,31 @@ assert_sha256() {
   log "sha256 OK: $(basename "$file") = $actual"
 }
 verify_registry_digest() {
-  local image="$1" expected="$2" actual
-  # The runner is x86_64; override the target arch so skopeo resolves the correct
-  # manifest (the amd64 index has nothing for an arm64 image).
+  local image="$1" expected="$2" inspect_arch="${3:-$ARCH}" actual
+  # Host tools and target payloads can intentionally have different architectures.
+  # Resolve the exact requested platform instead of assuming every image uses $ARCH.
   actual="$(
     skopeo inspect \
       --override-os linux \
-      --override-arch "$ARCH" \
+      --override-arch "$inspect_arch" \
       --creds "$GHCR_USER:$GHCR_TOKEN" \
       "docker://$image" | jq -r '.Digest'
   )"
-  log "registry digest: $image -> $actual"
-  [[ "$actual" == "$expected" ]] || fail "registry digest mismatch: image=$image expected=$expected actual=$actual"
+  log "registry digest: $image arch=$inspect_arch -> $actual"
+  [[ "$actual" == "$expected" ]] || fail "registry digest mismatch: image=$image arch=$inspect_arch expected=$expected actual=$actual"
 }
 
 require_cmd buildah skopeo jq sha256sum tar file sed grep install
-[[ "$RUNTIME_PROFILE" == docker ]] || fail "r1 supports Docker profile only (got: $RUNTIME_PROFILE)"
+[[ "$RUNTIME_PROFILE" == docker ]] || fail "r2 supports Docker profile only (got: $RUNTIME_PROFILE)"
 
 # Canonical provenance references. Buildah 1.33 on Ubuntu 24.04 cannot reliably
 # consume BuildKit OCI indexes with SBOM/provenance by repo@digest, so the release
-# builder verifies each tag's live registry digest first and then pulls that verified tag.
-# The cache tags are Archinfra-controlled release tags, not floating aliases.
-SEALOS_CACHE_REF="${SEALOS_CACHE_IMAGE}@${SEALOS_CACHE_DIGEST}"
+# builder verifies each immutable tag's live registry digest first and then pulls
+# that verified tag.
+SEALOS_BUILDER_CACHE_REF="${SEALOS_BUILDER_CACHE_IMAGE}@${SEALOS_BUILDER_CACHE_DIGEST}"
+SEALOS_TARGET_CACHE_REF="${SEALOS_TARGET_CACHE_IMAGE}@${SEALOS_TARGET_CACHE_DIGEST}"
+# Backward-compatible name means the target payload cache, not the host builder.
+SEALOS_CACHE_REF="$SEALOS_TARGET_CACHE_REF"
 DOCKER_CACHE_REF="${DOCKER_CACHE_IMAGE}@${DOCKER_CACHE_DIGEST}"
 CRICTL_CACHE_REF="${CRICTL_CACHE_IMAGE}@${CRICTL_CACHE_DIGEST}"
 KUBERNETES_CACHE_REF="${KUBERNETES_CACHE_IMAGE}@${KUBERNETES_CACHE_DIGEST}"
@@ -105,13 +108,13 @@ log "cache build git sha=$CACHE_BUILD_GIT_SHA run=$CACHE_BUILD_RUN_ID"
 # Authenticate rootful Buildah because Sealos also uses the root container storage.
 printf '%s' "$GHCR_TOKEN" | sudo buildah login --username "$GHCR_USER" --password-stdin ghcr.io >/dev/null
 
-# Fail closed before any cache content is consumed. The sealos builder is amd64
-# (host tool); the target-payload sealos cache carries the arch payload for the node.
-verify_registry_digest "$SEALOS_BUILDER_CACHE_IMAGE" "$SEALOS_BUILDER_CACHE_DIGEST"
-verify_registry_digest "$SEALOS_TARGET_CACHE_IMAGE" "$SEALOS_TARGET_CACHE_DIGEST"
-verify_registry_digest "$DOCKER_CACHE_IMAGE" "$DOCKER_CACHE_DIGEST"
-verify_registry_digest "$CRICTL_CACHE_IMAGE" "$CRICTL_CACHE_DIGEST"
-verify_registry_digest "$KUBERNETES_CACHE_IMAGE" "$KUBERNETES_CACHE_DIGEST"
+# Fail closed before any cache content is consumed. The Sealos builder is amd64
+# (host tool); the target Sealos cache carries runtime helpers for the node arch.
+verify_registry_digest "$SEALOS_BUILDER_CACHE_IMAGE" "$SEALOS_BUILDER_CACHE_DIGEST" amd64
+verify_registry_digest "$SEALOS_TARGET_CACHE_IMAGE" "$SEALOS_TARGET_CACHE_DIGEST" "$ARCH"
+verify_registry_digest "$DOCKER_CACHE_IMAGE" "$DOCKER_CACHE_DIGEST" "$ARCH"
+verify_registry_digest "$CRICTL_CACHE_IMAGE" "$CRICTL_CACHE_DIGEST" "$ARCH"
+verify_registry_digest "$KUBERNETES_CACHE_IMAGE" "$KUBERNETES_CACHE_DIGEST" "$ARCH"
 
 mount_cache() {
   local image="$1" cid
@@ -120,7 +123,7 @@ mount_cache() {
 }
 
 log "mount digest-verified cache artifacts"
-# Host builder (always amd64 sealos, executable on the x86_64 runner).
+# Host builder (always amd64 Sealos, executable on the x86_64 runner).
 MOUNT_SEALOS_BUILDER="$(sudo buildah from --platform linux/amd64 "$SEALOS_BUILDER_CACHE_IMAGE")"
 sudo buildah mount "$MOUNT_SEALOS_BUILDER"
 # Target payload caches, mounted at the target arch.
@@ -208,6 +211,8 @@ EOF
 cat > "$ROOT/etc/archinfra/cache-lock.env" <<EOF
 CACHE_BUILD_RUN_ID=$CACHE_BUILD_RUN_ID
 CACHE_BUILD_GIT_SHA=$CACHE_BUILD_GIT_SHA
+SEALOS_BUILDER_CACHE_REF=$SEALOS_BUILDER_CACHE_REF
+SEALOS_TARGET_CACHE_REF=$SEALOS_TARGET_CACHE_REF
 SEALOS_CACHE_REF=$SEALOS_CACHE_REF
 DOCKER_CACHE_REF=$DOCKER_CACHE_REF
 CRICTL_CACHE_REF=$CRICTL_CACHE_REF
@@ -248,7 +253,7 @@ sudo sealos build \
   --label "io.archinfra.cache.kubernetes=$KUBERNETES_CACHE_DIGEST" \
   --label "io.archinfra.cache.docker=$DOCKER_CACHE_DIGEST" \
   --label "io.archinfra.cache.crictl=$CRICTL_CACHE_DIGEST" \
-  --label "io.archinfra.cache.sealos=$SEALOS_CACHE_DIGEST" \
+  --label "io.archinfra.cache.sealos=$SEALOS_TARGET_CACHE_DIGEST" \
   --env "defaultVIP=10.103.97.2" \
   --env "sandboxImage=${pauseImage#*/}" \
   -t "$FINAL_IMAGE" \
@@ -287,6 +292,8 @@ CRICTL_VERSION=$CRICTL_VERSION
 REGISTRY_VERSION=$REGISTRY_VERSION
 DOCKER_BUNDLED_CONTAINERD_VERSION=$DOCKER_BUNDLED_CONTAINERD_VERSION
 DOCKER_BUNDLED_RUNC_VERSION=$DOCKER_BUNDLED_RUNC_VERSION
+SEALOS_BUILDER_CACHE_REF=$SEALOS_BUILDER_CACHE_REF
+SEALOS_TARGET_CACHE_REF=$SEALOS_TARGET_CACHE_REF
 SEALOS_CACHE_REF=$SEALOS_CACHE_REF
 DOCKER_CACHE_REF=$DOCKER_CACHE_REF
 CRICTL_CACHE_REF=$CRICTL_CACHE_REF
