@@ -223,8 +223,8 @@ jobs:
           ARM_INSPECT="$(docker buildx imagetools inspect "$ARM_IMAGE")"
           AMD_DIGEST="$(printf '%s\n' "$AMD_INSPECT" | awk '/^Digest:/ {print $2; exit}')"
           ARM_DIGEST="$(printf '%s\n' "$ARM_INSPECT" | awk '/^Digest:/ {print $2; exit}')"
-          test "$AMD_DIGEST" = sha256:*
-          test "$ARM_DIGEST" = sha256:*
+          [[ "$AMD_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$ARM_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
 
           echo "Publishing GHCR multi-arch manifest:"
           echo "  linux/amd64: $AMD_IMAGE@$AMD_DIGEST"
@@ -241,7 +241,7 @@ jobs:
           printf '%s\n' "$INSPECT" | grep -F 'linux/amd64' >/dev/null
           printf '%s\n' "$INSPECT" | grep -F 'linux/arm64' >/dev/null
           MULTI_DIGEST="$(printf '%s\n' "$INSPECT" | awk '/^Digest:/ {print $2; exit}')"
-          test "$MULTI_DIGEST" = sha256:*
+          [[ "$MULTI_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
 
           mkdir -p out
           cat > out/runtime-${RELEASE_VERSION}-multiarch.provenance.env <<EOF
@@ -289,8 +289,8 @@ jobs:
           ARM_INSPECT="$(docker buildx imagetools inspect "$ARM_IMAGE")"
           AMD_DIGEST="$(printf '%s\n' "$AMD_INSPECT" | awk '/^Digest:/ {print $2; exit}')"
           ARM_DIGEST="$(printf '%s\n' "$ARM_INSPECT" | awk '/^Digest:/ {print $2; exit}')"
-          test "$AMD_DIGEST" = sha256:*
-          test "$ARM_DIGEST" = sha256:*
+          [[ "$AMD_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$ARM_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
 
           docker buildx imagetools create \
             --tag "$MULTI_IMAGE" \
@@ -302,7 +302,7 @@ jobs:
           printf '%s\n' "$INSPECT" | grep -F 'linux/amd64' >/dev/null
           printf '%s\n' "$INSPECT" | grep -F 'linux/arm64' >/dev/null
           MULTI_DIGEST="$(printf '%s\n' "$INSPECT" | awk '/^Digest:/ {print $2; exit}')"
-          test "$MULTI_DIGEST" = sha256:*
+          [[ "$MULTI_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
 
           cat >> out/runtime-${RELEASE_VERSION}-multiarch.provenance.env <<EOF
           ALIYUN_MIRROR_STATUS=VERIFIED_MULTIARCH
