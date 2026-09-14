@@ -108,8 +108,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # The release lock is canonical amd64. Preserve the matrix target and
-          # re-select every architecture-specific value consumed by this step.
           _ARCH="${ARCH:-}"
           source archinfra/releases/v1.36.4-r2.env
           if [[ -n "$_ARCH" ]]; then ARCH="$_ARCH"; fi
@@ -201,9 +199,8 @@ jobs:
       - name: Install manifest verification tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends skopeo jq
+          sudo apt-get install -y --no-install-recommends jq
           docker buildx version
-          skopeo --version
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -214,9 +211,6 @@ jobs:
 
       - name: Publish verified GHCR multi-arch manifest
         shell: bash
-        env:
-          GHCR_USER: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           source archinfra/releases/v1.36.4-r2.env
@@ -225,15 +219,10 @@ jobs:
           ARM_IMAGE="$FINAL_IMAGE_ARM64"
           MULTI_IMAGE="${FINAL_IMAGE%-amd64}"
 
-          AMD_DIGEST="$(skopeo inspect \
-            --override-os linux --override-arch amd64 \
-            --creds "$GHCR_USER:$GHCR_TOKEN" \
-            "docker://$AMD_IMAGE" | jq -r '.Digest')"
-          ARM_DIGEST="$(skopeo inspect \
-            --override-os linux --override-arch arm64 \
-            --creds "$GHCR_USER:$GHCR_TOKEN" \
-            "docker://$ARM_IMAGE" | jq -r '.Digest')"
-
+          AMD_INSPECT="$(docker buildx imagetools inspect "$AMD_IMAGE")"
+          ARM_INSPECT="$(docker buildx imagetools inspect "$ARM_IMAGE")"
+          AMD_DIGEST="$(printf '%s\n' "$AMD_INSPECT" | awk '/^Digest:/ {print $2; exit}')"
+          ARM_DIGEST="$(printf '%s\n' "$ARM_INSPECT" | awk '/^Digest:/ {print $2; exit}')"
           test "$AMD_DIGEST" = sha256:*
           test "$ARM_DIGEST" = sha256:*
 
@@ -292,20 +281,16 @@ jobs:
           ARM_IMAGE="${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/kubernetes-runtime:${RELEASE_VERSION}-arm64"
           MULTI_IMAGE="${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/kubernetes-runtime:${RELEASE_VERSION}"
 
-          AMD_DIGEST="$(skopeo inspect \
-            --override-os linux --override-arch amd64 \
-            --creds "$ALIYUN_USERNAME:$ALIYUN_PASSWORD" \
-            "docker://$AMD_IMAGE" | jq -r '.Digest')"
-          ARM_DIGEST="$(skopeo inspect \
-            --override-os linux --override-arch arm64 \
-            --creds "$ALIYUN_USERNAME:$ALIYUN_PASSWORD" \
-            "docker://$ARM_IMAGE" | jq -r '.Digest')"
-          test "$AMD_DIGEST" = sha256:*
-          test "$ARM_DIGEST" = sha256:*
-
           printf '%s' "$ALIYUN_PASSWORD" | docker login \
             --username "$ALIYUN_USERNAME" \
             --password-stdin "$ALIYUN_REGISTRY"
+
+          AMD_INSPECT="$(docker buildx imagetools inspect "$AMD_IMAGE")"
+          ARM_INSPECT="$(docker buildx imagetools inspect "$ARM_IMAGE")"
+          AMD_DIGEST="$(printf '%s\n' "$AMD_INSPECT" | awk '/^Digest:/ {print $2; exit}')"
+          ARM_DIGEST="$(printf '%s\n' "$ARM_INSPECT" | awk '/^Digest:/ {print $2; exit}')"
+          test "$AMD_DIGEST" = sha256:*
+          test "$ARM_DIGEST" = sha256:*
 
           docker buildx imagetools create \
             --tag "$MULTI_IMAGE" \
