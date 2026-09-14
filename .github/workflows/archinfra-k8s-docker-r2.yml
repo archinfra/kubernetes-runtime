@@ -99,6 +99,7 @@ jobs:
         env:
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARCH: ${{ matrix.arch }}
           ALIYUN_REGISTRY: ${{ vars.ALIYUN_REGISTRY }}
           ALIYUN_NAMESPACE: ${{ vars.ALIYUN_NAMESPACE }}
           ALIYUN_USERNAME: ${{ secrets.ALIYUN_USERNAME }}
@@ -106,8 +107,11 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Keep the arch the matrix set (env file records canonical amd64).
+          _ARCH="${ARCH:-}"
           source archinfra/releases/v1.36.4-r2.env
-          PROVENANCE="out/runtime-v1.36.4-r2.provenance.env"
+          if [[ -n "$_ARCH" ]]; then ARCH="$_ARCH"; fi
+          PROVENANCE="out/runtime-${RELEASE_VERSION}.provenance.env"
           test -s "$PROVENANCE"
 
           : "${ALIYUN_REGISTRY:?organization variable ALIYUN_REGISTRY is required}"
@@ -118,6 +122,7 @@ jobs:
           ALIYUN_IMAGE="${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/kubernetes-runtime:${RELEASE_VERSION}-${ARCH}"
 
           SRC_DIGEST="$(skopeo inspect \
+            --override-os linux --override-arch "$ARCH" \
             --creds "$GHCR_USER:$GHCR_TOKEN" \
             "docker://$FINAL_IMAGE" | jq -r '.Digest')"
           test "$SRC_DIGEST" = "$(grep '^FINAL_DIGEST=' "$PROVENANCE" | cut -d= -f2-)"
@@ -165,6 +170,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kubernetes-runtime-v1.36.4-r2-provenance
+          name: kubernetes-runtime-v1.36.4-r2-${{ matrix.arch }}-provenance
           path: out/
           if-no-files-found: warn
