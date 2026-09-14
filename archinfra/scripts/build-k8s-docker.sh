@@ -13,8 +13,8 @@ _ARCH="${ARCH:-}"
 source "$RELEASE_FILE"
 if [[ -n "$_ARCH" ]]; then ARCH="$_ARCH"; fi
 
-# Select per-arch target-payload cache images + final tag. The canonical lock is
-# amd64; the *_ARM64 variants (present in the lock) are used when ARCH=arm64.
+# Select per-arch target-payload cache images, source checksums, and final tag.
+# The canonical lock is amd64; the *_ARM64 variants are selected for ARM builds.
 # NOTE: the Sealos builder stays amd64 (host build tool) regardless of ARCH;
 # Sealos runtime helpers are selected from the target-architecture Sealos cache.
 case "${ARCH:-amd64}" in
@@ -25,6 +25,10 @@ case "${ARCH:-amd64}" in
     CRICTL_CACHE_DIGEST="${CRICTL_CACHE_DIGEST_ARM64}"
     KUBERNETES_CACHE_IMAGE="${KUBERNETES_CACHE_IMAGE_ARM64}"
     KUBERNETES_CACHE_DIGEST="${KUBERNETES_CACHE_DIGEST_ARM64}"
+    DOCKER_SOURCE_SHA256="${DOCKER_SOURCE_SHA256_ARM64}"
+    CRI_DOCKERD_SOURCE_SHA256="${CRI_DOCKERD_SOURCE_SHA256_ARM64}"
+    CRICTL_SOURCE_SHA256="${CRICTL_SOURCE_SHA256_ARM64}"
+    KUBERNETES_IMAGE_LIST_SHA256="${KUBERNETES_IMAGE_LIST_SHA256_ARM64}"
     FINAL_IMAGE="${FINAL_IMAGE_ARM64}"
     ;;
 esac
