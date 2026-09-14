@@ -13,12 +13,12 @@ _ARCH="${ARCH:-}"
 source "$RELEASE_FILE"
 if [[ -n "$_ARCH" ]]; then ARCH="$_ARCH"; fi
 
-# Select per-arch cache images + final tag. The canonical lock is amd64; the
-# *_ARM64 variants (present in the lock) are used when ARCH=arm64.
+# Select per-arch target-payload cache images + final tag. The canonical lock is
+# amd64; the *_ARM64 variants (present in the lock) are used when ARCH=arm64.
+# NOTE: the Sealos *builder* stays amd64 (host build tool) regardless of ARCH —
+# only the payload images (docker/crictl/kubernetes) flip arch.
 case "${ARCH:-amd64}" in
   arm64)
-    SEALOS_CACHE_IMAGE="${SEALOS_CACHE_IMAGE_ARM64}"
-    SEALOS_CACHE_DIGEST="${SEALOS_CACHE_DIGEST_ARM64}"
     DOCKER_CACHE_IMAGE="${DOCKER_CACHE_IMAGE_ARM64}"
     DOCKER_CACHE_DIGEST="${DOCKER_CACHE_DIGEST_ARM64}"
     CRICTL_CACHE_IMAGE="${CRICTL_CACHE_IMAGE_ARM64}"
@@ -28,6 +28,20 @@ case "${ARCH:-amd64}" in
     FINAL_IMAGE="${FINAL_IMAGE_ARM64}"
     ;;
 esac
+
+# The Sealos builder is a HOST tool running on the x86_64 GitHub runner; it must
+# always be the amd64 sealos even when ARCH=arm64. Its payload (image-cri-shim,
+# sealctl, lvscare) ships into the target rootfs, so we keep an arm64 sealos cache
+# ref purely for that payload.
+SEALOS_BUILDER_CACHE_IMAGE="${SEALOS_CACHE_IMAGE}"
+SEALOS_BUILDER_CACHE_DIGEST="${SEALOS_CACHE_DIGEST}"
+if [[ "$ARCH" == "arm64" ]]; then
+  SEALOS_TARGET_CACHE_IMAGE="${SEALOS_CACHE_IMAGE_ARM64}"
+  SEALOS_TARGET_CACHE_DIGEST="${SEALOS_CACHE_DIGEST_ARM64}"
+else
+  SEALOS_TARGET_CACHE_IMAGE="${SEALOS_CACHE_IMAGE}"
+  SEALOS_TARGET_CACHE_DIGEST="${SEALOS_CACHE_DIGEST}"
+fi
 
 GHCR_USER="${GHCR_USER:?GHCR_USER is required}"
 GHCR_TOKEN="${GHCR_TOKEN:?GHCR_TOKEN is required}"
@@ -54,7 +68,15 @@ assert_sha256() {
 }
 verify_registry_digest() {
   local image="$1" expected="$2" actual
-  actual="$(skopeo inspect --creds "$GHCR_USER:$GHCR_TOKEN" "docker://$image" | jq -r '.Digest')"
+  # The runner is x86_64; override the target arch so skopeo resolves the correct
+  # manifest (the amd64 index has nothing for an arm64 image).
+  actual="$(
+    skopeo inspect \
+      --override-os linux \
+      --override-arch "$ARCH" \
+      --creds "$GHCR_USER:$GHCR_TOKEN" \
+      "docker://$image" | jq -r '.Digest'
+  )"
   log "registry digest: $image -> $actual"
   [[ "$actual" == "$expected" ]] || fail "registry digest mismatch: image=$image expected=$expected actual=$actual"
 }
@@ -83,8 +105,10 @@ log "cache build git sha=$CACHE_BUILD_GIT_SHA run=$CACHE_BUILD_RUN_ID"
 # Authenticate rootful Buildah because Sealos also uses the root container storage.
 printf '%s' "$GHCR_TOKEN" | sudo buildah login --username "$GHCR_USER" --password-stdin ghcr.io >/dev/null
 
-# Fail closed before any cache content is consumed.
-verify_registry_digest "$SEALOS_CACHE_IMAGE" "$SEALOS_CACHE_DIGEST"
+# Fail closed before any cache content is consumed. The sealos builder is amd64
+# (host tool); the target-payload sealos cache carries the arch payload for the node.
+verify_registry_digest "$SEALOS_BUILDER_CACHE_IMAGE" "$SEALOS_BUILDER_CACHE_DIGEST"
+verify_registry_digest "$SEALOS_TARGET_CACHE_IMAGE" "$SEALOS_TARGET_CACHE_DIGEST"
 verify_registry_digest "$DOCKER_CACHE_IMAGE" "$DOCKER_CACHE_DIGEST"
 verify_registry_digest "$CRICTL_CACHE_IMAGE" "$CRICTL_CACHE_DIGEST"
 verify_registry_digest "$KUBERNETES_CACHE_IMAGE" "$KUBERNETES_CACHE_DIGEST"
@@ -96,7 +120,11 @@ mount_cache() {
 }
 
 log "mount digest-verified cache artifacts"
-MOUNT_SEALOS="$(mount_cache "$SEALOS_CACHE_IMAGE")"
+# Host builder (always amd64 sealos, executable on the x86_64 runner).
+MOUNT_SEALOS_BUILDER="$(sudo buildah from --platform linux/amd64 "$SEALOS_BUILDER_CACHE_IMAGE")"
+sudo buildah mount "$MOUNT_SEALOS_BUILDER"
+# Target payload caches, mounted at the target arch.
+MOUNT_SEALOS_TARGET="$(mount_cache "$SEALOS_TARGET_CACHE_IMAGE")"
 MOUNT_DOCKER="$(mount_cache "$DOCKER_CACHE_IMAGE")"
 MOUNT_CRICTL="$(mount_cache "$CRICTL_CACHE_IMAGE")"
 MOUNT_KUBE="$(mount_cache "$KUBERNETES_CACHE_IMAGE")"
@@ -109,17 +137,28 @@ assert_sha256 "$CRI_DOCKERD_SOURCE_SHA256" "$MOUNT_DOCKER/cri/cri-dockerd.tgz"
 assert_sha256 "$CRICTL_SOURCE_SHA256" "$MOUNT_CRICTL/cri/crictl.tar.gz"
 assert_sha256 "$KUBERNETES_IMAGE_LIST_SHA256" "$MOUNT_KUBE/images/shim/DefaultImageList"
 
-sudo "$MOUNT_KUBE/bin/kubeadm" version -o short | grep -Fx "v$KUBERNETES_VERSION" >/dev/null \
-  || fail "kubeadm in cache is not v$KUBERNETES_VERSION"
-sudo "$MOUNT_KUBE/bin/kubelet" --version | grep -F "v$KUBERNETES_VERSION" >/dev/null \
-  || fail "kubelet in cache is not v$KUBERNETES_VERSION"
-sudo "$MOUNT_KUBE/bin/kubectl" version --client=true 2>/dev/null | grep -F "v$KUBERNETES_VERSION" >/dev/null \
-  || fail "kubectl in cache is not v$KUBERNETES_VERSION"
+# Probe the k8s payload binaries. Execution only works on amd64 (the runner is
+# x86_64); for arm64 we assert aarch64 ELF instead (they cannot run on this host).
+if [[ "$ARCH" == "amd64" ]]; then
+  sudo "$MOUNT_KUBE/bin/kubeadm" version -o short | grep -Fx "v$KUBERNETES_VERSION" >/dev/null \
+    || fail "kubeadm in cache is not v$KUBERNETES_VERSION"
+  sudo "$MOUNT_KUBE/bin/kubelet" --version | grep -F "v$KUBERNETES_VERSION" >/dev/null \
+    || fail "kubelet in cache is not v$KUBERNETES_VERSION"
+  sudo "$MOUNT_KUBE/bin/kubectl" version --client=true 2>/dev/null | grep -F "v$KUBERNETES_VERSION" >/dev/null \
+    || fail "kubectl in cache is not v$KUBERNETES_VERSION"
+else
+  for b in kubeadm kubelet kubectl; do
+    file "$MOUNT_KUBE/bin/$b" | grep -qiE 'ARM aarch64|aarch64' \
+      || fail "$b in cache is not aarch64 ELF"
+  done
+fi
 
 # Resolve lvscare once for this build and record the immutable digest in provenance.
 # Sealos' image save path cannot consume tag@digest here, so we verify the versioned
 # tag first and pass that verified tag to Sealos while retaining the immutable ref.
-LVSCARE_DIGEST="$(skopeo inspect --creds "$GHCR_USER:$GHCR_TOKEN" "docker://$LVSCARE_IMAGE" | jq -r '.Digest')"
+LVSCARE_DIGEST="$(skopeo inspect \
+  --override-os linux --override-arch "$ARCH" \
+  --creds "$GHCR_USER:$GHCR_TOKEN" "docker://$LVSCARE_IMAGE" | jq -r '.Digest')"
 [[ "$LVSCARE_DIGEST" == sha256:* ]] || fail "unable to resolve lvscare digest for $LVSCARE_IMAGE"
 LVSCARE_REF="${LVSCARE_IMAGE}@${LVSCARE_DIGEST}"
 LVSCARE_RUNTIME_IMAGE="$LVSCARE_IMAGE"
@@ -132,9 +171,9 @@ cp -a "$REPO_ROOT/k8s/." "$ROOT/"
 mkdir -p "$ROOT/bin" "$ROOT/cri" "$ROOT/opt" "$ROOT/images/shim" "$ROOT/etc/archinfra"
 
 # Use the exact Sealos binary from the verified cache as the builder and ship its runtime helpers.
-sudo install -m 0755 "$MOUNT_SEALOS/sealos/sealos" /usr/local/bin/sealos
-sudo install -m 0755 "$MOUNT_SEALOS/sealos/image-cri-shim" "$ROOT/cri/image-cri-shim"
-sudo install -m 0755 "$MOUNT_SEALOS/sealos/sealctl" "$ROOT/opt/sealctl"
+sudo install -m 0755 "$MOUNT_SEALOS_BUILDER/sealos/sealos" /usr/local/bin/sealos
+sudo install -m 0755 "$MOUNT_SEALOS_TARGET/sealos/image-cri-shim" "$ROOT/cri/image-cri-shim"
+sudo install -m 0755 "$MOUNT_SEALOS_TARGET/sealos/sealctl" "$ROOT/opt/sealctl"
 sealos version | grep -F "$SEALOS_VERSION" >/dev/null || fail "Sealos builder is not $SEALOS_VERSION"
 
 # Docker profile payload.
@@ -224,7 +263,9 @@ sudo sealos login -u "$GHCR_USER" -p "$GHCR_TOKEN" ghcr.io >/dev/null
 sudo sealos push "$FINAL_IMAGE"
 sudo sealos logout ghcr.io >/dev/null || true
 
-FINAL_DIGEST="$(skopeo inspect --creds "$GHCR_USER:$GHCR_TOKEN" "docker://$FINAL_IMAGE" | jq -r '.Digest')"
+FINAL_DIGEST="$(skopeo inspect \
+  --override-os linux --override-arch "$ARCH" \
+  --creds "$GHCR_USER:$GHCR_TOKEN" "docker://$FINAL_IMAGE" | jq -r '.Digest')"
 [[ "$FINAL_DIGEST" == sha256:* ]] || fail "unable to resolve final image digest"
 
 PROVENANCE="$OUT_DIR/runtime-$RELEASE_VERSION.provenance.env"
